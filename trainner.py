@@ -14,3 +14,4 @@ class CustomTrainer(Trainer):
         loss = F.mse_loss(logits, labels.float())  # 예제: MSE 손실 적용
 
         return (loss, outputs) if return_outputs else loss
+#dd
