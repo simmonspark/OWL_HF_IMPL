@@ -81,8 +81,8 @@ if __name__ == "__main__":
     model.load_state_dict(state_hf)  # ✅ 반환값을 사용하지 않음
 
     # 3. 이미지와 탐지할 객체 설정
-    image_path = "/home/sien/사진/스크린샷/스크린샷 2025-02-04 18-56-15.png"
-    objects_to_detect = ["cat", "dog", "person"]  # 감지할 객체 리스트
+    image_path = "/home/sien/사진/스크린샷/스크린샷 2025-02-05 22-21-52.png"
+    objects_to_detect = ["bicycle", "car", "person"]  # 감지할 객체 리스트
 
     # 4. 이미지 및 텍스트 처리
     image = load_image(image_path)
