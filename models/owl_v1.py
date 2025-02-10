@@ -2,8 +2,7 @@ from transformers import OwlViTProcessor, OwlViTForObjectDetection
 import torch
 import torch.nn as nn
 import math
-from transformers.models.owlvit.modeling_owlvit import OwlViTObjectDetectionOutput, \
-    OwlViTImageGuidedObjectDetectionOutput, OwlViTOutput, BaseModelOutputWithPooling, BaseModelOutput
+from transformers.models.owlvit.modeling_owlvit import OwlViTObjectDetectionOutput
 from typing import Any, Dict, Optional, Tuple, Union
 
 
@@ -443,11 +442,7 @@ class OwlViTTextTransformer(nn.Module):
     def forward(
             self,
             input_ids: torch.Tensor,
-            attention_mask=None,
-            position_ids=None,
-            output_attentions=None,
-            output_hidden_states=None,
-            return_dict=None,
+            position_ids=None
     ):
         input_shape = input_ids.size()
         input_ids = input_ids.view(-1, input_shape[-1])
