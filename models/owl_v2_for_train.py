@@ -14,6 +14,8 @@ text vision vit:
     1. text embed : B T C
     2. pool : B C
 이렇게 리턴함 
+
+pool은 contrastive learning에서 쓰이고, detection에서는 vision embed랑 text pool을 사용함
 '''
 
 
@@ -202,9 +204,7 @@ class OwlViTForObjectDetection(nn.Module):
             input_ids=input_ids,
             pixel_values=pixel_values
         )
-        # 이건 안씀
-        text_outputs = outputs[4]
-        vision_outputs = outputs[5]
+
 
         batch_size, num_patches, num_patches, hidden_dim = feature_map.shape
         image_feats = torch.reshape(feature_map, (batch_size, num_patches * num_patches, hidden_dim))
@@ -213,7 +213,7 @@ class OwlViTForObjectDetection(nn.Module):
         query_embeds = query_embeds.reshape(batch_size, max_text_queries, query_embeds.shape[-1])
         input_ids = input_ids.reshape(batch_size, max_text_queries, input_ids.shape[-1])
         query_mask = input_ids[..., 0] > 0
-        #idx[0] : 1, 586,3
+        #idx[0] : 1, 576,3
         #idx[1] : 1, 576, 512
         (pred_logits, class_embeds) = self.class_predictor(image_feats, query_embeds, query_mask)
         pred_boxes = self.box_predictor(image_feats, feature_map)
@@ -234,8 +234,8 @@ class OwlViTForObjectDetection(nn.Module):
             pred_boxes=pred_boxes,
             logits=pred_logits,
             class_embeds=class_embeds,
-            text_model_output=text_outputs,
-            vision_model_output=vision_outputs,
+            text_model_output=None,
+            vision_model_output=None,
         )
 
 
@@ -267,7 +267,7 @@ class OwlViTClassPredictionHead(nn.Module):
         logit_scale = self.logit_scale(image_embeds)
         logit_scale = self.elu(logit_scale) + 1
         pred_logits = (pred_logits + logit_shift) * logit_scale
-        #idx[0] : 1, 586,3
+        #idx[0] : 1, 576,3
         #idx[1] : 1, 576, 512
         return (pred_logits, image_class_embeds)
 
