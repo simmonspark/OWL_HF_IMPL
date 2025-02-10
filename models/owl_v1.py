@@ -156,138 +156,7 @@ class OwlViTForObjectDetection(nn.Module):
 
         return (text_embeds, image_embeds, outputs)
 
-    def image_embedder(
-            self,
-            pixel_values: torch.FloatTensor,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
-    ) -> Tuple[torch.FloatTensor]:
-        # Get OwlViTModel vision embeddings (same as CLIP)
-        vision_outputs = self.owlvit.vision_model(pixel_values=pixel_values, return_dict=True)
 
-        # Apply post_layernorm to last_hidden_state, return non-projected output
-        last_hidden_state = vision_outputs[0]
-        image_embeds = self.owlvit.vision_model.post_layernorm(last_hidden_state)
-
-        # Resize class token
-        class_token_out = torch.broadcast_to(image_embeds[:, :1, :], image_embeds[:, :-1].shape)
-
-        # Merge image embedding with class tokens
-        image_embeds = image_embeds[:, 1:, :] * class_token_out
-        image_embeds = self.layer_norm(image_embeds)
-
-        # Resize to [batch_size, num_patches, num_patches, hidden_size]
-        new_size = (
-            image_embeds.shape[0],
-            self.sqrt_num_patches,
-            self.sqrt_num_patches,
-            image_embeds.shape[-1],
-        )
-        image_embeds = image_embeds.reshape(new_size)
-
-        return (image_embeds, vision_outputs)
-
-    def embed_image_query(
-            self, query_image_features: torch.FloatTensor, query_feature_map: torch.FloatTensor
-    ) -> torch.FloatTensor:
-        _, class_embeds = self.class_predictor(query_image_features)
-        pred_boxes = self.box_predictor(query_image_features, query_feature_map)
-        pred_boxes_as_corners = center_to_corners_format(pred_boxes)
-
-        # Loop over query images
-        best_class_embeds = []
-        best_box_indices = []
-        pred_boxes_device = pred_boxes_as_corners.device
-
-        for i in range(query_image_features.shape[0]):
-            each_query_box = torch.tensor([[0, 0, 1, 1]], device=pred_boxes_device)
-            each_query_pred_boxes = pred_boxes_as_corners[i]
-            ious, _ = box_iou(each_query_box, each_query_pred_boxes)
-
-            # If there are no overlapping boxes, fall back to generalized IoU
-            if torch.all(ious[0] == 0.0):
-                ious = generalized_box_iou(each_query_box, each_query_pred_boxes)
-
-            # Use an adaptive threshold to include all boxes within 80% of the best IoU
-            iou_threshold = torch.max(ious) * 0.8
-
-            selected_inds = (ious[0] >= iou_threshold).nonzero()
-            if selected_inds.numel():
-                selected_embeddings = class_embeds[i][selected_inds.squeeze(1)]
-                mean_embeds = torch.mean(class_embeds[i], axis=0)
-                mean_sim = torch.einsum("d,id->i", mean_embeds, selected_embeddings)
-                best_box_ind = selected_inds[torch.argmin(mean_sim)]
-                best_class_embeds.append(class_embeds[i][best_box_ind])
-                best_box_indices.append(best_box_ind)
-
-        if best_class_embeds:
-            query_embeds = torch.stack(best_class_embeds)
-            box_indices = torch.stack(best_box_indices)
-        else:
-            query_embeds, box_indices = None, None
-
-        return query_embeds, box_indices, pred_boxes
-
-    def image_guided_detection(
-            self,
-            pixel_values,
-            query_pixel_values=None,
-            output_attentions=None,
-            output_hidden_states=None,
-            return_dict=None,
-    ):
-
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
-
-        # Compute feature maps for the input and query images
-        query_feature_map = self.image_embedder(pixel_values=query_pixel_values)[0]
-        feature_map, vision_outputs = self.image_embedder(
-            pixel_values=pixel_values,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-        )
-
-        batch_size, num_patches, num_patches, hidden_dim = feature_map.shape
-        image_feats = torch.reshape(feature_map, (batch_size, num_patches * num_patches, hidden_dim))
-
-        batch_size, num_patches, num_patches, hidden_dim = query_feature_map.shape
-        query_image_feats = torch.reshape(query_feature_map, (batch_size, num_patches * num_patches, hidden_dim))
-        # Get top class embedding and best box index for each query image in batch
-        query_embeds, best_box_indices, query_pred_boxes = self.embed_image_query(query_image_feats, query_feature_map)
-
-        # Predict object classes [batch_size, num_patches, num_queries+1]
-        (pred_logits, class_embeds) = self.class_predictor(image_feats=image_feats, query_embeds=query_embeds)
-
-        # Predict object boxes
-        target_pred_boxes = self.box_predictor(image_feats, feature_map)
-
-        if not return_dict:
-            output = (
-                feature_map,
-                query_feature_map,
-                target_pred_boxes,
-                query_pred_boxes,
-                pred_logits,
-                class_embeds,
-                vision_outputs.to_tuple(),
-            )
-            output = tuple(x for x in output if x is not None)
-            return output
-
-        return OwlViTImageGuidedObjectDetectionOutput(
-            image_embeds=feature_map,
-            query_image_embeds=query_feature_map,
-            target_pred_boxes=target_pred_boxes,
-            query_pred_boxes=query_pred_boxes,
-            logits=pred_logits,
-            class_embeds=class_embeds,
-            text_model_output=None,
-            vision_model_output=vision_outputs,
-        )
 
     def forward(
             self,
@@ -499,56 +368,50 @@ class OwlViTModel(nn.Module):
             return_base_image_embeds=None,
             return_dict=None,
     ):
-
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
+        # idx[0] : last_hidden_state : 1, 577, 768
+        # idx[1] : pooler_output : 1,768
         vision_outputs = self.vision_model(
             pixel_values=pixel_values,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
+            output_attentions=None,
+            output_hidden_states=None,
+            return_dict=None,
         )
-
-        # Get embeddings for all text queries in all batch samples
+        # idx[0] : last_hidden_state -> shape(3,16,512)
+        # idx[1] : pooled_output -> shape(3,512)
         text_outputs = self.text_model(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
+            output_attentions=None,
+            output_hidden_states=None,
+            return_dict=None,
         )
 
         text_embeds = text_outputs[1]
         text_embeds = self.text_projection(text_embeds)
         image_embeds = vision_outputs[1]
         image_embeds = self.visual_projection(image_embeds)
-
-        # normalized features
         image_embeds = image_embeds / torch.linalg.norm(image_embeds, ord=2, dim=-1, keepdim=True)
         text_embeds_norm = text_embeds / torch.linalg.norm(text_embeds, ord=2, dim=-1, keepdim=True)
 
-        # cosine similarity as logits and set it on the correct device
         logit_scale = self.logit_scale.exp().to(image_embeds.device)
 
         logits_per_text = torch.matmul(text_embeds_norm, image_embeds.t()) * logit_scale
         logits_per_image = logits_per_text.t()
-
-        loss = None
-        if return_loss:
-            loss = owlvit_loss(logits_per_text)
-
         text_embeds = text_embeds_norm
 
-        if not return_dict:
-            output = (logits_per_image, logits_per_text, text_embeds, image_embeds, text_outputs, vision_outputs)
-            return ((loss,) + output) if loss is not None else output
-
+        #return
+        #logits_per_image : idx[0] : 1,3
+        #logits_per_text : idx[1] : 3,1
+        #text_embeds : idx[2] : 3,512
+        #image_embeds : idx[3] : 1,512
+        #text_model_output : idx[4] :
+            #idx[0] : last_hidden_state -> shape(3,16,512)
+            #idx[1] : pooled_output -> shape(3,512)
+        #vision_model_output : idx[5] :
+            # idx[0] : last_hidden_state : 1, 577, 768
+            # idx[1] : pooler_output : 1,768
         return OwlViTOutput(
-            loss=loss,
+            loss=None,
             logits_per_image=logits_per_image,
             logits_per_text=logits_per_text,
             text_embeds=text_embeds,
@@ -574,13 +437,7 @@ class OwlViTVisionTransformer(nn.Module):
             output_hidden_states=None,
             return_dict=None,
     ):
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        # Cast the input to the expected `dtype`
         expected_input_dtype = self.embeddings.patch_embedding.weight.dtype
         pixel_values = pixel_values.to(expected_input_dtype)
 
@@ -589,24 +446,23 @@ class OwlViTVisionTransformer(nn.Module):
 
         encoder_outputs = self.encoder(
             inputs_embeds=hidden_states,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
+            output_attentions=None,
+            output_hidden_states=None,
+            return_dict=None,
         )
 
         last_hidden_state = encoder_outputs[0]
         pooled_output = last_hidden_state[:, 0, :]
 
         pooled_output = self.post_layernorm(pooled_output)
-
-        if not return_dict:
-            return (last_hidden_state, pooled_output) + encoder_outputs[1:]
-
+        #return
+        # idx[0] : last_hidden_state : 1, 577, 768
+        # idx[1] : pooler_output : 1,768
         return BaseModelOutputWithPooling(
             last_hidden_state=last_hidden_state,
             pooler_output=pooled_output,
-            hidden_states=encoder_outputs.hidden_states,
-            attentions=encoder_outputs.attentions,
+            hidden_states=None,
+            attentions=None,
         )
 
 
@@ -660,53 +516,32 @@ class OwlViTTextTransformer(nn.Module):
             output_hidden_states=None,
             return_dict=None,
     ):
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
         input_shape = input_ids.size()
         input_ids = input_ids.view(-1, input_shape[-1])
         hidden_states = self.embeddings(input_ids=input_ids, position_ids=position_ids)
 
-        # num_samples, seq_len = input_shape  where num_samples = batch_size * num_max_text_queries
-        # OWLVIT's text model uses causal mask, prepare it here.
-        # https://github.com/openai/CLIP/blob/cfcffb90e69f37bf2ff1e988237a0fbe41f33c04/clip/model.py#L324
-        causal_attention_mask = None
-        # expand attention_mask
-        if attention_mask is not None:
-            # [num_samples, seq_len] -> [num_samples, 1, tgt_seq_len, src_seq_len]
-            # attention_mask = _prepare_4d_attention_mask(attention_mask, hidden_states.dtype)
-            pass
-
         encoder_outputs = self.encoder(
             inputs_embeds=hidden_states,
             attention_mask=attention_mask,
-            causal_attention_mask=causal_attention_mask,
+            causal_attention_mask=None,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
         )
-
         last_hidden_state = encoder_outputs[0]
         last_hidden_state = self.final_layer_norm(last_hidden_state)
-
-        # take features from the end of tokens embedding (end of token is the highest number in each sequence)
-        # casting to torch.int for onnx compatibility: argmax doesn't support int64 inputs with opset 14
         pooled_output = last_hidden_state[
             torch.arange(last_hidden_state.shape[0], device=last_hidden_state.device),
             input_ids.to(torch.int).argmax(dim=-1).to(last_hidden_state.device),
         ]
-
-        if not return_dict:
-            return (last_hidden_state, pooled_output) + encoder_outputs[1:]
-
+        #return
+        # idx[0] : last_hidden_state -> shape(3,16,512)
+        # idx[1] : pooled_output -> shape(3,512)
         return BaseModelOutputWithPooling(
             last_hidden_state=last_hidden_state,
             pooler_output=pooled_output,
-            hidden_states=encoder_outputs.hidden_states,
-            attentions=encoder_outputs.attentions,
+            hidden_states=None,
+            attentions=None,
         )
 
 
@@ -728,14 +563,10 @@ class OwlViTTextEmbeddings(nn.Module):
             position_ids=None,
             inputs_embeds=None,
     ) -> torch.Tensor:
+
         seq_length = input_ids.shape[-1] if input_ids is not None else inputs_embeds.shape[-2]
-
-        if position_ids is None:
-            position_ids = self.position_ids[:, :seq_length]
-
-        if inputs_embeds is None:
-            inputs_embeds = self.token_embedding(input_ids)
-
+        position_ids = self.position_ids[:, :seq_length]
+        inputs_embeds = self.token_embedding(input_ids)
         position_embeddings = self.position_embedding(position_ids)
         embeddings = inputs_embeds + position_embeddings
 
@@ -755,41 +586,18 @@ class OwlViTEncoder(nn.Module):
             causal_attention_mask=None,
             output_attentions=None,
             output_hidden_states=None,
-            return_dict=None,
+            return_dict=True,
     ):
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
-
-        encoder_states = () if output_hidden_states else None
-        all_attentions = () if output_attentions else None
-
         hidden_states = inputs_embeds
         for encoder_layer in self.layers:
-            if output_hidden_states:
-                encoder_states = encoder_states + (hidden_states,)
             layer_outputs = encoder_layer(
                 hidden_states,
                 attention_mask,
                 causal_attention_mask,
                 output_attentions=output_attentions,
             )
-
             hidden_states = layer_outputs[0]
-
-            if output_attentions:
-                all_attentions = all_attentions + (layer_outputs[1],)
-
-        if output_hidden_states:
-            encoder_states = encoder_states + (hidden_states,)
-
-        if not return_dict:
-            return tuple(v for v in [hidden_states, encoder_states, all_attentions] if v is not None)
-        return BaseModelOutput(
-            last_hidden_state=hidden_states, hidden_states=encoder_states, attentions=all_attentions
-        )
+        return BaseModelOutput(last_hidden_state=hidden_states)
 
 
 class OwlViTEncoderLayer(nn.Module):
@@ -827,8 +635,6 @@ class OwlViTEncoderLayer(nn.Module):
 
         outputs = (hidden_states,)
 
-        if output_attentions:
-            outputs += (attn_weights,)
 
         return outputs
 
@@ -872,30 +678,8 @@ class OwlViTAttention(nn.Module):
         key_states = key_states.view(*proj_shape)
         value_states = value_states.view(*proj_shape)
 
-        src_len = key_states.size(1)
         attn_weights = torch.bmm(query_states, key_states.transpose(1, 2))
-
-        if attn_weights.size() != (bsz * self.num_heads, tgt_len, src_len):
-            raise ValueError(
-                f"Attention weights should be of size {(bsz * self.num_heads, tgt_len, src_len)}, but is"
-                f" {attn_weights.size()}"
-            )
-        if causal_attention_mask is not None:
-            if causal_attention_mask.size() != (bsz, 1, tgt_len, src_len):
-                raise ValueError(
-                    f"Attention mask should be of size {(bsz, 1, tgt_len, src_len)}, but is"
-                    f" {causal_attention_mask.size()}"
-                )
-            attn_weights = attn_weights.view(bsz, self.num_heads, tgt_len, src_len) + causal_attention_mask
-            attn_weights = attn_weights.view(bsz * self.num_heads, tgt_len, src_len)
-
         attn_weights = nn.functional.softmax(attn_weights, dim=-1)
-
-        if output_attentions:
-            attn_weights_reshaped = attn_weights.view(bsz, self.num_heads, tgt_len, src_len)
-            attn_weights = attn_weights_reshaped.view(bsz * self.num_heads, tgt_len, src_len)
-        else:
-            attn_weights_reshaped = None
 
         attn_probs = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
         attn_probs = attn_probs.to(value_states.dtype)
@@ -906,7 +690,7 @@ class OwlViTAttention(nn.Module):
 
         attn_output = self.out_proj(attn_output)
 
-        return attn_output, attn_weights_reshaped
+        return attn_output, None
 
 
 # o
@@ -930,74 +714,9 @@ class NewGELUActivation(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(1.702 * x)
 
-def _upcast(t):
-    # Protects from numerical overflows in multiplications by upcasting to the equivalent higher type
-    if t.is_floating_point():
-        return t if t.dtype in (torch.float32, torch.float64) else t.float()
-    else:
-        return t if t.dtype in (torch.int32, torch.int64) else t.int()
-
-
-def box_area(boxes):
-    boxes = _upcast(boxes)
-    return (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
-
-
-def box_iou(boxes1, boxes2):
-    area1 = box_area(boxes1)
-    area2 = box_area(boxes2)
-
-    left_top = torch.max(boxes1[:, None, :2], boxes2[:, :2])  # [N,M,2]
-    right_bottom = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])  # [N,M,2]
-
-    width_height = (right_bottom - left_top).clamp(min=0)  # [N,M,2]
-    inter = width_height[:, :, 0] * width_height[:, :, 1]  # [N,M]
-
-    union = area1[:, None] + area2 - inter
-
-    iou = inter / union
-    return iou, union
-
-
-def generalized_box_iou(boxes1, boxes2):
-    if not (boxes1[:, 2:] >= boxes1[:, :2]).all():
-        raise ValueError(f"boxes1 must be in [x0, y0, x1, y1] (corner) format, but got {boxes1}")
-    if not (boxes2[:, 2:] >= boxes2[:, :2]).all():
-        raise ValueError(f"boxes2 must be in [x0, y0, x1, y1] (corner) format, but got {boxes2}")
-    iou, union = box_iou(boxes1, boxes2)
-
-    top_left = torch.min(boxes1[:, None, :2], boxes2[:, :2])
-    bottom_right = torch.max(boxes1[:, None, 2:], boxes2[:, 2:])
-
-    width_height = (bottom_right - top_left).clamp(min=0)  # [N,M,2]
-    area = width_height[:, :, 0] * width_height[:, :, 1]
-
-    return iou - (area - union) / area
-
-
-def center_to_corners_format(bboxes_center):
-    return _center_to_corners_format_torch(bboxes_center)
-
-
-def _center_to_corners_format_torch(bboxes_center: "torch.Tensor") -> "torch.Tensor":
-    center_x, center_y, width, height = bboxes_center.unbind(-1)
-    bbox_corners = torch.stack(
-        # top left x, top left y, bottom right x, bottom right y
-        [(center_x - 0.5 * width), (center_y - 0.5 * height), (center_x + 0.5 * width), (center_y + 0.5 * height)],
-        dim=-1,
-    )
-    return bbox_corners
-
-
-def prepare_text_queries(objects):
-    return [objects]
-
-
 def contrastive_loss(logits: torch.Tensor) -> torch.Tensor:
     return nn.functional.cross_entropy(logits, torch.arange(len(logits), device=logits.device))
 
-
-# Copied from transformers.models.clip.modeling_clip.clip_loss with clip->owlvit
 def owlvit_loss(similarity: torch.Tensor) -> torch.Tensor:
     caption_loss = contrastive_loss(similarity)
     image_loss = contrastive_loss(similarity.t())

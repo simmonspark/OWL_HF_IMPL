@@ -77,7 +77,7 @@ if __name__ == "__main__":
     state_hf = hf_model.state_dict()
     print(state_hf.keys())
     # 사용자 정의 모델 인스턴스화 및 가중치 적용
-    model = v1(config).cuda()
+    model = v2(config).cuda()
     print(model.state_dict().keys())
     model.load_state_dict(state_hf)  # ✅ 반환값을 사용하지 않음
 
