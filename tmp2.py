@@ -20,7 +20,7 @@ def detect_objects(image, text_queries, model, processor, threshold=0.1):
 
     # 모델 실행
     with torch.no_grad():
-        outputs = model(input_ids = inputs["input_ids"].cuda(), attention_mask = inputs["attention_mask"].cuda(),pixel_values = inputs["pixel_values"].cuda())
+        outputs = model(input_ids = inputs["input_ids"].cuda(), pixel_values = inputs["pixel_values"].cuda())
 
     # Target image sizes (height, width) to rescale box predictions [batch_size, 2]
     target_sizes = torch.Tensor([image.size[::-1]])  # (H, W) 형태

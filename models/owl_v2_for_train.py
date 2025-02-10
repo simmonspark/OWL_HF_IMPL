@@ -2,8 +2,7 @@ from transformers import OwlViTProcessor, OwlViTForObjectDetection
 import torch
 import torch.nn as nn
 import math
-from transformers.models.owlvit.modeling_owlvit import OwlViTObjectDetectionOutput, \
-    OwlViTImageGuidedObjectDetectionOutput, OwlViTOutput, BaseModelOutputWithPooling, BaseModelOutput
+from transformers.models.owlvit.modeling_owlvit import OwlViTObjectDetectionOutput
 from typing import Any, Dict, Optional, Tuple, Union
 
 
@@ -121,10 +120,7 @@ class OwlViTForObjectDetection(nn.Module):
     def image_text_embedder(
             self,
             input_ids: torch.Tensor,
-            pixel_values: torch.FloatTensor,
-            attention_mask: torch.Tensor,
-            output_attentions: Optional[bool] = None,
-            output_hidden_states: Optional[bool] = None,
+            pixel_values: torch.FloatTensor
     ) -> Tuple[torch.FloatTensor]:
 
         #logits_per_image : idx[0] : 1,3
@@ -139,11 +135,7 @@ class OwlViTForObjectDetection(nn.Module):
             # idx[1] : pooler_output : 1,768
         outputs = self.owlvit(
             pixel_values=pixel_values,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=True,
+            input_ids=input_ids
         )
         image_embeds = self.owlvit.vision_model.post_layernorm(outputs[5][0])
 
@@ -180,18 +172,9 @@ class OwlViTForObjectDetection(nn.Module):
     def forward(
             self,
             input_ids,
-            pixel_values,
-            attention_mask=None,
-            output_attentions=None,
-            output_hidden_states=None,
-            return_dict=None,
+            pixel_values
     ):
 
-        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
-        return_dict = return_dict if return_dict is not None else self.config.return_dict
 
         #idx[0] : 3,512
         #idx[1] : 1,24,24, 768
@@ -208,10 +191,7 @@ class OwlViTForObjectDetection(nn.Module):
                 # idx[1] : pooler_output : 1,768
         query_embeds, feature_map, outputs = self.image_text_embedder(
             input_ids=input_ids,
-            pixel_values=pixel_values,
-            attention_mask=attention_mask,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
+            pixel_values=pixel_values
         )
 
         text_outputs = outputs[4]
@@ -319,70 +299,33 @@ class OwlViTModel(nn.Module):
         self.text_projection = nn.Linear(self.text_embed_dim, self.projection_dim, bias=False)
         self.logit_scale = nn.Parameter(torch.tensor(config.logit_scale_init_value))
 
-    def get_text_features(
-            self,
-            input_ids=None,
-            attention_mask=None,
-            output_attentions=None,
-            output_hidden_states=None,
-            return_dict=None,
-    ) -> torch.FloatTensor:
+    def get_text_features(self,input_ids=None) -> torch.FloatTensor:
         # idx[0] : last_hidden_state -> shape(3,16,512)
         # idx[1] : pooled_output -> shape(3,512)
-        text_output = self.text_model(input_ids=input_ids, attention_mask=attention_mask, return_dict=return_dict)
+        text_output = self.text_model(input_ids=input_ids)
         pooled_output = text_output[1]
         text_features = self.text_projection(pooled_output)
         return text_features
 
     def get_image_features(
             self,
-            pixel_values=None,
-            output_attentions=None,
-            output_hidden_states=None,
-            return_dict=None,
+            pixel_values=None
     ) -> torch.FloatTensor:
 
-        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
         # idx[0] : last_hidden_state : 1, 577, 768
         # idx[1] : pooler_output : 1,768
-        vision_outputs = self.vision_model(
-            pixel_values=pixel_values,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
-        )
+        vision_outputs = self.vision_model(pixel_values=pixel_values)
         pooled_output = vision_outputs[1]
         image_features = self.visual_projection(pooled_output)
         return image_features
 
-    def forward(
-            self,
-            input_ids=None,
-            pixel_values=None,
-            attention_mask=None,
-            return_loss=None,
-            output_attentions=None,
-            output_hidden_states=None,
-            return_base_image_embeds=None,
-            return_dict=None,
-    ):
+    def forward(self,input_ids=None,pixel_values=None):
         # idx[0] : last_hidden_state : 1, 577, 768
         # idx[1] : pooler_output : 1,768
-        vision_outputs = self.vision_model(
-            pixel_values=pixel_values,
-            output_attentions=None,
-            output_hidden_states=None,
-            return_dict=None,
-        )
+        vision_outputs = self.vision_model(pixel_values=pixel_values)
         # idx[0] : last_hidden_state -> shape(3,16,512)
         # idx[1] : pooled_output -> shape(3,512)
-        text_outputs = self.text_model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            output_attentions=None,
-            output_hidden_states=None,
-            return_dict=None,
-        )
+        text_outputs = self.text_model(input_ids=input_ids)
 
         text_embeds = text_outputs[1]
         text_embeds = self.text_projection(text_embeds)
@@ -408,15 +351,7 @@ class OwlViTModel(nn.Module):
         #vision_model_output : idx[5] :
             # idx[0] : last_hidden_state : 1, 577, 768
             # idx[1] : pooler_output : 1,768
-        return OwlViTOutput(
-            loss=None,
-            logits_per_image=logits_per_image,
-            logits_per_text=logits_per_text,
-            text_embeds=text_embeds,
-            image_embeds=image_embeds,
-            text_model_output=text_outputs,
-            vision_model_output=vision_outputs,
-        )
+        return (logits_per_image,logits_per_text,text_embeds,image_embeds,text_outputs,vision_outputs)
 
 
 class OwlViTVisionTransformer(nn.Module):
@@ -428,13 +363,7 @@ class OwlViTVisionTransformer(nn.Module):
         self.encoder = OwlViTEncoder(config)
         self.post_layernorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
-    def forward(
-            self,
-            pixel_values: torch.FloatTensor,
-            output_attentions=None,
-            output_hidden_states=None,
-            return_dict=None,
-    ):
+    def forward(self,pixel_values: torch.FloatTensor):
 
         expected_input_dtype = self.embeddings.patch_embedding.weight.dtype
         pixel_values = pixel_values.to(expected_input_dtype)
@@ -442,26 +371,16 @@ class OwlViTVisionTransformer(nn.Module):
         hidden_states = self.embeddings(pixel_values)
         hidden_states = self.pre_layernorm(hidden_states)
 
-        encoder_outputs = self.encoder(
-            inputs_embeds=hidden_states,
-            output_attentions=None,
-            output_hidden_states=None,
-            return_dict=None,
-        )
+        encoder_outputs = self.encoder(inputs_embeds=hidden_states)
 
-        last_hidden_state = encoder_outputs[0]
+        last_hidden_state = encoder_outputs
         pooled_output = last_hidden_state[:, 0, :]
 
         pooled_output = self.post_layernorm(pooled_output)
         #return
         # idx[0] : last_hidden_state : 1, 577, 768
         # idx[1] : pooler_output : 1,768
-        return BaseModelOutputWithPooling(
-            last_hidden_state=last_hidden_state,
-            pooler_output=pooled_output,
-            hidden_states=None,
-            attentions=None,
-        )
+        return (last_hidden_state,pooled_output)
 
 
 class OwlViTVisionEmbeddings(nn.Module):
@@ -508,25 +427,16 @@ class OwlViTTextTransformer(nn.Module):
     def forward(
             self,
             input_ids: torch.Tensor,
-            attention_mask=None,
-            position_ids=None,
-            output_attentions=None,
-            output_hidden_states=None,
-            return_dict=None,
+            position_ids=None
     ):
         input_shape = input_ids.size()
         input_ids = input_ids.view(-1, input_shape[-1])
         hidden_states = self.embeddings(input_ids=input_ids, position_ids=position_ids)
 
         encoder_outputs = self.encoder(
-            inputs_embeds=hidden_states,
-            attention_mask=attention_mask,
-            causal_attention_mask=None,
-            output_attentions=output_attentions,
-            output_hidden_states=output_hidden_states,
-            return_dict=return_dict,
+            inputs_embeds=hidden_states
         )
-        last_hidden_state = encoder_outputs[0]
+        last_hidden_state = encoder_outputs
         last_hidden_state = self.final_layer_norm(last_hidden_state)
         pooled_output = last_hidden_state[
             torch.arange(last_hidden_state.shape[0], device=last_hidden_state.device),
@@ -535,12 +445,7 @@ class OwlViTTextTransformer(nn.Module):
         #return
         # idx[0] : last_hidden_state -> shape(3,16,512)
         # idx[1] : pooled_output -> shape(3,512)
-        return BaseModelOutputWithPooling(
-            last_hidden_state=last_hidden_state,
-            pooler_output=pooled_output,
-            hidden_states=None,
-            attentions=None,
-        )
+        return (last_hidden_state,pooled_output)
 
 
 class OwlViTTextEmbeddings(nn.Module):
@@ -577,25 +482,12 @@ class OwlViTEncoder(nn.Module):
         self.config = config
         self.layers = nn.ModuleList([OwlViTEncoderLayer(config) for _ in range(config.num_hidden_layers)])
 
-    def forward(
-            self,
-            inputs_embeds,
-            attention_mask=None,
-            causal_attention_mask=None,
-            output_attentions=None,
-            output_hidden_states=None,
-            return_dict=True,
-    ):
+    def forward(self,inputs_embeds):
         hidden_states = inputs_embeds
         for encoder_layer in self.layers:
-            layer_outputs = encoder_layer(
-                hidden_states,
-                attention_mask,
-                causal_attention_mask,
-                output_attentions=output_attentions,
-            )
+            layer_outputs = encoder_layer(hidden_states)
             hidden_states = layer_outputs[0]
-        return BaseModelOutput(last_hidden_state=hidden_states)
+        return (hidden_states)
 
 
 class OwlViTEncoderLayer(nn.Module):
@@ -608,22 +500,11 @@ class OwlViTEncoderLayer(nn.Module):
         self.mlp = OwlViTMLP(config)
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
 
-    def forward(
-            self,
-            hidden_states: torch.Tensor,
-            attention_mask: torch.Tensor,
-            causal_attention_mask: torch.Tensor,
-            output_attentions=False,
-    ):
+    def forward(self,hidden_states: torch.Tensor):
         residual = hidden_states
 
         hidden_states = self.layer_norm1(hidden_states)
-        hidden_states, attn_weights = self.self_attn(
-            hidden_states=hidden_states,
-            attention_mask=attention_mask,
-            causal_attention_mask=causal_attention_mask,
-            output_attentions=output_attentions,
-        )
+        hidden_states = self.self_attn(hidden_states=hidden_states)
         hidden_states = residual + hidden_states
 
         residual = hidden_states
@@ -632,8 +513,6 @@ class OwlViTEncoderLayer(nn.Module):
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
-
-
         return outputs
 
 
@@ -662,10 +541,7 @@ class OwlViTAttention(nn.Module):
         return input.view(B, T, self.num_heads, self.head_dim).transpose(1, 2).contiguous()
 
     def forward(self,
-                hidden_states: torch.Tensor,
-                attention_mask=None,
-                causal_attention_mask=None,
-                output_attentions=False):
+                hidden_states: torch.Tensor):
         bsz, tgt_len, embed_dim = hidden_states.size()
         query_states = self.q_proj(hidden_states) * self.scale
         key_states = self._shape(self.k_proj(hidden_states), -1, bsz)
@@ -688,7 +564,7 @@ class OwlViTAttention(nn.Module):
 
         attn_output = self.out_proj(attn_output)
 
-        return attn_output, None
+        return attn_output
 
 
 # o
