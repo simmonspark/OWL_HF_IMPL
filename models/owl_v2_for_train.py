@@ -5,6 +5,17 @@ import math
 from transformers.models.owlvit.modeling_owlvit import OwlViTObjectDetectionOutput
 from typing import Any, Dict, Optional, Tuple, Union
 
+'''
+vision vit:
+    encoder를 돌려서 
+    1. img embed : B T C
+    2. pool : B C
+text vision vit:
+    1. text embed : B T C
+    2. pool : B C
+이렇게 리턴함 
+'''
+
 
 class OwlViTConfig:
     def __init__(self, **kwargs):
@@ -151,7 +162,7 @@ class OwlViTForObjectDetection(nn.Module):
             image_embeds.shape[-1],
         )
         image_embeds = image_embeds.reshape(new_size)
-        text_embeds = outputs[-4]
+        text_embeds = outputs[2]
         #idx[0] : 3,512
         #idx[1] : 1,24,24, 768
         #idx[2] :
@@ -174,8 +185,6 @@ class OwlViTForObjectDetection(nn.Module):
             input_ids,
             pixel_values
     ):
-
-
         #idx[0] : 3,512
         #idx[1] : 1,24,24, 768
         #idx[2] :
@@ -193,7 +202,7 @@ class OwlViTForObjectDetection(nn.Module):
             input_ids=input_ids,
             pixel_values=pixel_values
         )
-
+        # 이건 안씀
         text_outputs = outputs[4]
         vision_outputs = outputs[5]
 
