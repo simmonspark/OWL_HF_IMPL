@@ -566,7 +566,7 @@ class OwlViTAttention(nn.Module):
 
         attn_probs = nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
         attn_probs = attn_probs.to(value_states.dtype)
-        attn_output = torch.bmm(attn_probs, value_states)
+        attn_output = attn_probs @ value_states
         attn_output = attn_output.view(bsz, self.num_heads, tgt_len, self.head_dim)
         attn_output = attn_output.transpose(1, 2)
         attn_output = attn_output.reshape(bsz, tgt_len, embed_dim)

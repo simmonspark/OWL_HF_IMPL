@@ -83,7 +83,7 @@ if __name__ == "__main__":
 
     # 3. 이미지와 탐지할 객체 설정
     image_path = "/home/sien/사진/스크린샷/스크린샷 2025-02-05 22-21-52.png"
-    objects_to_detect = ["bicycle", "car", "person"]  # 감지할 객체 리스트
+    objects_to_detect = ["car"]  # 감지할 객체 리스트
 
     # 4. 이미지 및 텍스트 처리
     image = load_image(image_path)
