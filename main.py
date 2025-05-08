@@ -11,7 +11,8 @@ from tqdm import tqdm
 
 from loss import PushPullLoss
 from dataset import get_dataloaders
-from models.testmodel import PostProcess, load_model
+from models.testmodel import PostProcess
+from models.final_model import load_model
 from utils.train_util import (
     coco_to_model_input,
     labels_to_classnames,

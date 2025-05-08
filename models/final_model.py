@@ -18,7 +18,6 @@ text vision vit:
 pool은 contrastive learning에서 쓰이고, detection에서는 vision embed랑 text pool을 사용함
 '''
 
-
 class OwlViTConfig:
     def __init__(self, **kwargs):
         for key, value in kwargs.items():
@@ -45,7 +44,7 @@ class Preprocessor:
 
 
 class OwlViTForObjectDetection(nn.Module):
-    def __init__(self, config):
+    def __init__(self, config,query = None):
         super(OwlViTForObjectDetection, self).__init__()
         self.config = config
         self.owlvit = OwlViTModel(config)
@@ -57,6 +56,8 @@ class OwlViTForObjectDetection(nn.Module):
 
         self.sqrt_num_patches = config.vision_config.image_size // config.vision_config.patch_size
         self.box_bias = self.compute_box_bias(self.sqrt_num_patches)
+        if query is not None:
+            self.query = torch.nn.Parameter(query)
 
     @staticmethod
     def normalize_grid_corner_coordinates(num_patches: int) -> torch.Tensor:
@@ -165,9 +166,6 @@ class OwlViTForObjectDetection(nn.Module):
         )
         image_embeds = image_embeds.reshape(new_size)
         text_embeds = outputs[2]
-
-        #text_embeds = torch.mean(text_embeds, dim=0, keepdim=True)
-
         #idx[0] : 3,512
         #idx[1] : 1,24,24, 768
         #idx[2] :
@@ -262,9 +260,6 @@ class OwlViTClassPredictionHead(nn.Module):
     ) -> Tuple[torch.FloatTensor]:
         image_class_embeds = self.dense0(image_embeds)
         image_class_embeds = image_class_embeds / (torch.linalg.norm(image_class_embeds, dim=-1, keepdim=True) + 1e-6)
-
-        query_embeds = torch.mean(query_embeds, dim=0, keepdim=True)
-
         query_embeds = query_embeds / (torch.linalg.norm(query_embeds, dim=-1, keepdim=True) + 1e-6)
 
         pred_logits = torch.einsum("...pd,...qd->...pq", image_class_embeds, query_embeds)
@@ -304,23 +299,13 @@ class OwlViTModel(nn.Module):
         text_config = config.text_config
         vision_config = config.vision_config
         self.projection_dim = config.projection_dim
-        self.text_embed_dim = text_config.hidden_size
         self.vision_embed_dim = vision_config.hidden_size
 
-        self.text_model = OwlViTTextTransformer(text_config)
         self.vision_model = OwlViTVisionTransformer(vision_config)
 
         self.visual_projection = nn.Linear(self.vision_embed_dim, self.projection_dim, bias=False)
-        self.text_projection = nn.Linear(self.text_embed_dim, self.projection_dim, bias=False)
         self.logit_scale = nn.Parameter(torch.tensor(config.logit_scale_init_value))
 
-    def get_text_features(self,input_ids=None) -> torch.FloatTensor:
-        # idx[0] : last_hidden_state -> shape(3,16,512)
-        # idx[1] : pooled_output -> shape(3,512)
-        text_output = self.text_model(input_ids=input_ids)
-        pooled_output = text_output[1]
-        text_features = self.text_projection(pooled_output)
-        return text_features
 
     def get_image_features(
             self,
@@ -337,35 +322,14 @@ class OwlViTModel(nn.Module):
     def forward(self,input_ids=None,pixel_values=None):
         # idx[0] : last_hidden_state : 1, 577, 768
         # idx[1] : pooler_output : 1,768
-        vision_outputs = self.vision_model(pixel_values=pixel_values)
-        # idx[0] : last_hidden_state -> shape(3,16,512)
-        # idx[1] : pooled_output -> shape(3,512)
-        text_outputs = self.text_model(input_ids=input_ids)
+        vision_outputs = self.get_image_features(pixel_values=pixel_values)
 
-        text_embeds = text_outputs[1]
-        text_embeds = self.text_projection(text_embeds)
         image_embeds = vision_outputs[1]
         image_embeds = self.visual_projection(image_embeds)
         image_embeds = image_embeds / torch.linalg.norm(image_embeds, ord=2, dim=-1, keepdim=True)
-        text_embeds_norm = text_embeds / torch.linalg.norm(text_embeds, ord=2, dim=-1, keepdim=True)
 
         logit_scale = self.logit_scale.exp().to(image_embeds.device)
 
-        logits_per_text = torch.matmul(text_embeds_norm, image_embeds.t()) * logit_scale
-        logits_per_image = logits_per_text.t()
-        text_embeds = text_embeds_norm
-
-        #return
-        #logits_per_image : idx[0] : 1,3
-        #logits_per_text : idx[1] : 3,1
-        #text_embeds : idx[2] : 3,512
-        #image_embeds : idx[3] : 1,512
-        #text_model_output : idx[4] :
-            #idx[0] : last_hidden_state -> shape(3,16,512)
-            #idx[1] : pooled_output -> shape(3,512)
-        #vision_model_output : idx[5] :
-            # idx[0] : last_hidden_state : 1, 577, 768
-            # idx[1] : pooler_output : 1,768
         return (logits_per_image,logits_per_text,text_embeds,image_embeds,text_outputs,vision_outputs)
 
 
@@ -611,20 +575,74 @@ def owlvit_loss(similarity: torch.Tensor) -> torch.Tensor:
     image_loss = contrastive_loss(similarity.t())
     return (caption_loss + image_loss) / 2.0
 
-
-if __name__ == "__main__":
+def load_model(labelmap, device):
+    from transformers import AutoProcessor
+    import os
+    from PIL import Image
     from transformers import OwlViTForObjectDetection as hf_model
     from transformers import OwlViTConfig
 
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
     # 전체 config 가져오기
     config_dict = OwlViTConfig.get_config_dict("google/owlvit-base-patch32")
-
-    # 딕셔너리를 OwlViTConfig 클래스로 변환
     config = OwlViTConfig(config_dict[0])
 
     # 모델 로드
     tmp = hf_model.from_pretrained("google/owlvit-base-patch32")
     state_hf = tmp.state_dict()
-    print(state_hf.keys())
     model = OwlViTForObjectDetection(config)
+    print(state_hf.keys())
     print(model.state_dict().keys())
+
+    _model = tmp
+    _processor = AutoProcessor.from_pretrained("google/owlvit-base-patch32")
+
+    to_encode = []
+    for label in labelmap.values():
+        to_encode.append(label)
+
+    print("Initializing priors from labels...")
+    inputs = _processor(
+        text=[to_encode],
+        images=Image.new("RGB", (224, 224)),
+        return_tensors="pt",
+    )
+
+    with torch.no_grad():
+        queries = _model(**inputs).text_embeds
+
+    patched_model = OwlViTForObjectDetection(config, queries)
+    patched_model.load_state_dict(state_hf,strict=False)
+    for name, parameter in patched_model.named_parameters():
+        conditions = [
+            "layers.11" in name,
+            "box" in name,
+            "post_layernorm" in name,
+            "class_predictor" in name,
+            "queries" in name,
+        ]
+        if any(conditions):
+            continue
+
+        parameter.requires_grad = False
+
+    print("Trainable parameters:")
+    for name, parameter in patched_model.named_parameters():
+        if parameter.requires_grad:
+            print(f"  {name}")
+    print()
+    return patched_model.to(device)
+import yaml
+def get_training_config():
+    with open("../config.yaml", "r") as stream:
+        data = yaml.safe_load(stream)
+        return data["training"]
+from dataset import get_dataloaders
+
+if __name__ == "__main__":
+
+    training_cfg = get_training_config()
+    train_dataloader, test_dataloader, scales, labelmap = get_dataloaders()
+
+    model = load_model(labelmap, 'cuda')
